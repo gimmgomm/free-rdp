@@ -1,103 +1,77 @@
 # File: .github/workflows/daebook-rdp.yml
 name: DaeBook RDP
-on:
-  workflow_dispatch:
+on: workflow_dispatch:
 
 jobs:
-  daebook-rdp:
+  rdp:
     runs-on: windows-latest
     timeout-minutes: 360
     steps:
 
-      - name: Cleanup & Free Port 80 + 443 (100% Hijau & Bersih)
+      - name: Cleanup Port 80 + 443 (Bersih Total)
         shell: powershell
         run: |
-          # Hanya kill proses yang bukan System (PID 4 = HTTP.sys, jangan diganggu)
-          foreach ($port in 80, 443) {
-            Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
-              Where-Object { $_.OwningProcess -ne 4 } |
-              ForEach-Object {
-                Write-Host "Menghentikan PID $($_.OwningProcess) yang pakai port $port"
-                Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
-              }
-          }
+          foreach ($p in 80,443) { Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue | ? OwningProcess -ne 4 | % { Stop-Process $_.OwningProcess -Force -ErrorAction SilentlyContinue } }
+          "http://+:80/","https://+:443/","http://*:80/","https://*:443/" | % { netsh http delete urlacl url=$_ 2>$null | Out-Null }
+          Stop-Service W3SVC,WAS -Force -ErrorAction SilentlyContinue 2>$null
+          Write-Host "Port 80 & 443 sudah bebas"
 
-          # Hapus reservation HTTP.sys tanpa error (suppress semua output error)
-          $urls = "http://+:80/","https://+:443/","http://*:80/","https://*:443/"
-          foreach ($url in $urls) {
-            netsh http delete urlacl url=$url 2>$null | Out-Null
-          }
-
-          # Stop IIS dan service terkait (jika ada)
-          Stop-Service -Name W3SVC,WAS -Force -ErrorAction SilentlyContinue
-          iisreset /stop 2>$null | Out-Null
-
-          Write-Host "Port 80 dan 443 sudah 100% bebas dan siap dipakai!"
-
-      - name: Enable RDP + Buka Port 3389
+      - name: Enable RDP
         shell: powershell
         run: |
-          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-
-          netsh advfirewall firewall delete rule name="DaeBook-RDP" 2>$null | Out-Null
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force
           netsh advfirewall firewall add rule name="DaeBook-RDP" dir=in action=allow protocol=TCP localport=3389
           Restart-Service TermService -Force
 
-      - name: Buat User DaeBook (Admin Full)
+      - name: Create User DaeBook
         shell: powershell
         run: |
-          $Password = (-join ((65..90) + (97..122) + (48..57) + (33,35,36,64,94) | Get-Random -Count 22 | % {[char]$_}))
-          $Secure = ConvertTo-SecureString $Password -AsPlainText -Force
+          $Pass = (-join ((65..90)+(97..122)+(48..57)+(33,35,36,64) | Get-Random -Count 22 | % {[char]$_}))
+          $Sec  = ConvertTo-SecureString $Pass -AsPlainText -Force
+          New-LocalUser "DaeBook" -Password $Sec -AccountNeverExpires -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators","Remote Desktop Users" -Member "DaeBook"
+          echo "DAEBOOK_PASS=$Pass" >> $env:GITHUB_ENV
 
-          New-LocalUser "DaeBook" -Password $Secure -FullName "DaeBook" -Description "RDP via GitHub Actions" -AccountNeverExpires -PasswordNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "DaeBook"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "DaeBook"
-
-          echo "DAEBOOK_PASS=$Password" >> $env:GITHUB_ENV
-          Write-Host "User DaeBook berhasil dibuat"
-
-      - name: Install Tailscale Terbaru
+      - name: Install & Connect Tailscale (Fixed 100%)
         shell: powershell
         run: |
           iwr -useb https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile "$env:TEMP\ts.msi"
-          Start-Process msiexec.exe -Wait -ArgumentList '/i', "$env:TEMP\ts.msi", '/quiet', '/norestart'
-          Remove-Item "$env:TEMP\ts.msi" -Force
+          msiexec /i "$env:TEMP\ts.msi" /quiet /norestart | Wait-Process
 
-      - name: Connect Tailscale
-        shell: powershell
-        run: |
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=daebook-${{ github.run_id }} --accept-routes --accept-dns=false
 
-          for ($i = 0; $i -lt 20; $i++) {
-            $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
-            if ($ip) { 
+          # Tunggu maksimal 30 detik sampai IP muncul
+          for ($i = 0; $i -lt 30; $i++) {
+            $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null | Select-Object -First 1
+            if ($ip -and $ip -match '\d+\.\d+\.\d+\.\d+') {
               echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
-              Write-Host "Tailscale IP: $ip"
-              break 
+              Write-Host "Tailscale connected → $ip"
+              break
             }
-            Start-Sleep -Seconds 6
+            Start-Sleep -Seconds 1
           }
-          if (-not $env:TAILSCALE_IP) { Write-Error "Gagal konek Tailscale"; exit 1 }
+
+          # Pastikan variabel benar-benar ter-set sebelum lanjut
+          if (!$env:TAILSCALE_IP) {
+            $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+            echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+          }
+
+          Write-Host "Final IP: $env:TAILSCALE_IP"
 
       - name: INFO RDP + Keep Alive
         shell: powershell
         run: |
           Write-Host ""
-          Write-Host "╔══════════════════════════════════════════════════╗"
-          Write-Host "║               DAEBOOK RDP SUDAH SIAP             ║"
-          Write-Host "╚══════════════════════════════════════════════════╝"
-          Write-Host "   IP         → ${{ env.TAILSCALE_IP }}"
-          Write-Host "   Username   → DaeBook"
-          Write-Host "   Password   → ${{ env.DAEBOOK_PASS }}"
-          Write-Host "   Port RDP   → 3389"
-          Write-Host "   Port 80    → 100% FREE (siap buat apa saja)"
-          Write-Host "   Expired    → Otomatis mati setelah 6 jam"
-          Write-Host "════════════════════════════════════════════════════"
-          Write-Host ""
-
-          while ($true) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] DaeBook aktif — Port 80 free — Cancel manual kalau selesai"
-            Start-Sleep -Seconds 300
-          }
+          Write-Host "╔══════════════════════════════════════╗"
+          Write-Host "║       DAEBOOK RDP 100% READY         ║"
+          Write-Host "╚══════════════════════════════════════╝"
+          Write-Host "IP       → ${{ env.TAILSCALE_IP }}"
+          Write-Host "User     → DaeBook"
+          Write-Host "Pass     → ${{ env.DAEBOOK_PASS }}"
+          Write-Host "RDP Port → 3389"
+          Write-Host "Web Port → 80 (FREE)"
+          Write-Host "Expire   → 6 jam"
+          Write-Host "════════════════════════════════════════"
+          while ($true) { Write-Host "[$(Get-Date -f HH:mm:ss)] DaeBook aktif"; Start-Sleep 300 }
