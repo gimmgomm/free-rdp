@@ -17,15 +17,20 @@ jobs:
 
       - name: Buat User DaeBook + Random Password Administrator
         run: |
-          $daePass = -join ((65..90 + 97..122 + 48..57 + 33,35,36,64,94) | Get-Random -Count 24 | % {[char]$_})
-          $adminPass = -join ((65..90 + 97..122 + 48..57 + 33,35,36,64,94) | Get-Random -Count 28 | % {[char]$_})
+          # Password DaeBook (24 char)
+          $daePass = -join ((65..90 + 97..122 + 48..57 + 33..46 + 58..64 + 91..96 + 123..126) | Get-Random -Count 24 | % {[char]$_})
           $daeSec  = ConvertTo-SecureString $daePass -AsPlainText -Force
-          $adminSec = ConvertTo-SecureString $adminPass -AsPlainText -Force
 
-          New-LocalUser -Name "DaeBook" -Password $daeSec -AccountNeverExpires -PasswordNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "DaeBook"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "DaeBook"
+          # Password Administrator (28 char)
+          $adminPass = -join ((65..90 + 97..122 + 48..57 + 33..46 + 58..64 + 91..96 + 123..126) | Get-Random -Count 28 | % {[char]$_})
+          $adminSec  = ConvertTo-SecureString $adminPass -AsPlainText -Force
 
+          # Buat user DaeBook + masukin ke grup yang benar
+          New-LocalUser -Name "DaeBook" -Password $daeSec -AccountNeverExpires -PasswordNeverExpires:$true -FullName "DaeBook" -Description "GitHub Runner"
+          Add-LocalGroupMember -Group "Administrators" -Member "DaeBook" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "DaeBook" -ErrorAction SilentlyContinue
+
+          # Random ulang password built-in Administrator + aktifin
           net user Administrator $adminPass
           net user Administrator /active:yes
 
@@ -38,23 +43,23 @@ jobs:
           msiexec /i ts.msi /quiet /norestart
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=dae-${{ github.run_id }} --accept-risk=all
 
-          for($i=0;$i -lt 20;$i++){
+          for($i=0;$i -lt 25;$i++){
             $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
-            if($ip){echo "TS_IP=$ip" >> $env:GITHUB_ENV; break}
+            if($ip){ echo "TS_IP=$ip" >> $env:GITHUB_ENV; break }
             Start-Sleep 4
           }
 
-      - name: Forward port 80 → 3389
+      - name: Port Forwarding 80 → 3389
         run: |
           netsh interface portproxy delete v4tov4 listenport=80 listenaddress=0.0.0.0 | Out-Null
           netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connectport=3389 connectaddress=127.0.0.1
-          netsh advfirewall firewall add rule name="RDP-80" dir=in action=allow protocol=TCP localport=80
+          netsh advfirewall firewall add rule name="RDP-80" dir=in action=allow protocol=TCP localport=80 profile=any
 
-      - name: Tampilkan Kredensial + Keep Alive
+      - name: Info + Keep Alive
         run: |
           Write-Host ""
           Write-Host "════════════════════════════════════════"
-          Write-Host "           RDP SUDAH SIAP (PORT 80)     "
+          Write-Host "           RDP SIAP – CONNECT KE PORT 80"
           Write-Host "════════════════════════════════════════"
           Write-Host "IP        : $($env:TS_IP):80"
           Write-Host "User 1    : DaeBook"
@@ -62,4 +67,7 @@ jobs:
           Write-Host "User 2    : Administrator"
           Write-Host "Pass 2    : $($env:ADMIN_PASS)"
           Write-Host "════════════════════════════════════════"
-          while($true){ Write-Host "[$(Get-Date -Format HH:mm:ss)] Aktif → $($env:TS_IP):80"; Start-Sleep 300 }
+          while($true){
+            Write-Host "[$(Get-Date -Format HH:mm:ss)] Aktif → $($env:TS_IP):80"
+            Start-Sleep 300
+          }
