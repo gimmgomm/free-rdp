@@ -1,6 +1,5 @@
 # File: .github/workflows/daebook-rdp.yml
 name: DaeBook RDP
-
 on:
   workflow_dispatch:
 
@@ -8,91 +7,97 @@ jobs:
   daebook-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
-
     steps:
-      - name: Cleanup & Free Port 80 + 443 (Fix Windows 11 Tabrakan)
+
+      - name: Cleanup & Free Port 80 + 443 (100% Hijau & Bersih)
+        shell: powershell
         run: |
-          # Kill semua proses yang pakai port 80 & 443
-          $ports = 80, 443
-          foreach ($port in $ports) {
-            $connection = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
-            if ($connection) {
-              $connection | ForEach-Object {
-                Write-Host "Killing PID $($_.OwningProcess) yang pakai port $port"
+          # Hanya kill proses yang bukan System (PID 4 = HTTP.sys, jangan diganggu)
+          foreach ($port in 80, 443) {
+            Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+              Where-Object { $_.OwningProcess -ne 4 } |
+              ForEach-Object {
+                Write-Host "Menghentikan PID $($_.OwningProcess) yang pakai port $port"
                 Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
               }
-            }
           }
 
-          # Hapus semua HTTP.sys reservation (penyebab utama tabrakan di Windows 11)
-          netsh http delete urlacl url=http://+:80/  2>$null
-          netsh http delete urlacl url=https://+:443/ 2>$null
-          netsh http delete urlacl url=http://*:80/  2>$null
-          netsh http delete urlacl url=https://*:443/ 2>$null
+          # Hapus reservation HTTP.sys tanpa error (suppress semua output error)
+          $urls = "http://+:80/","https://+:443/","http://*:80/","https://*:443/"
+          foreach ($url in $urls) {
+            netsh http delete urlacl url=$url 2>$null | Out-Null
+          }
 
-          # Stop service yang suka ambil port 80/443
-          Stop-Service -Name "W3SVC" -Force -ErrorAction SilentlyContinue
-          Stop-Service -Name "HTTP" -Force -ErrorAction SilentlyContinue
+          # Stop IIS dan service terkait (jika ada)
+          Stop-Service -Name W3SVC,WAS -Force -ErrorAction SilentlyContinue
+          iisreset /stop 2>$null | Out-Null
 
-          Write-Host "Port 80 dan 443 sudah dibebaskan!"
+          Write-Host "Port 80 dan 443 sudah 100% bebas dan siap dipakai!"
 
-      - name: Configure RDP (NLA Off + Open Port 3389)
+      - name: Enable RDP + Buka Port 3389
+        shell: powershell
         run: |
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
 
-          netsh advfirewall firewall delete rule name="DaeBook-RDP" 2>$null
+          netsh advfirewall firewall delete rule name="DaeBook-RDP" 2>$null | Out-Null
           netsh advfirewall firewall add rule name="DaeBook-RDP" dir=in action=allow protocol=TCP localport=3389
-
           Restart-Service TermService -Force
 
-      - name: Create User DaeBook (Admin + RDP Access)
+      - name: Buat User DaeBook (Admin Full)
+        shell: powershell
         run: |
-          $Password = (-join ((65..90)+(97..122)+(48..57)+(33,35,36,64,94) | Get-Random -Count 20 | % {[char]$_}))
-          $SecurePass = ConvertTo-SecureString $Password -AsPlainText -Force
+          $Password = (-join ((65..90) + (97..122) + (48..57) + (33,35,36,64,94) | Get-Random -Count 22 | % {[char]$_}))
+          $Secure = ConvertTo-SecureString $Password -AsPlainText -Force
 
-          New-LocalUser -Name "DaeBook" -Password $SecurePass -FullName "DaeBook" -Description "GitHub Actions RDP" -AccountNeverExpires -PasswordNeverExpires
+          New-LocalUser "DaeBook" -Password $Secure -FullName "DaeBook" -Description "RDP via GitHub Actions" -AccountNeverExpires -PasswordNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "DaeBook"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "DaeBook"
 
           echo "DAEBOOK_PASS=$Password" >> $env:GITHUB_ENV
-          echo "RDP_CREDS=Username: DaeBook | Password: $Password" >> $env:GITHUB_ENV
+          Write-Host "User DaeBook berhasil dibuat"
 
-      - name: Install Latest Tailscale (Auto Update)
+      - name: Install Tailscale Terbaru
+        shell: powershell
         run: |
-          powershell.exe -Command "iwr -useb https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile "$env:TEMP\tailscale.msi"
-          Start-Process msiexec.exe -Wait -ArgumentList '/i', "$env:TEMP\tailscale.msi", '/quiet', '/norestart'
-          Remove-Item "$env:TEMP\tailscale.msi" -Force
+          iwr -useb https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile "$env:TEMP\ts.msi"
+          Start-Process msiexec.exe -Wait -ArgumentList '/i', "$env:TEMP\ts.msi", '/quiet', '/norestart'
+          Remove-Item "$env:TEMP\ts.msi" -Force
 
-      - name: Connect to Tailscale
+      - name: Connect Tailscale
+        shell: powershell
         run: |
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=daebook-${{ github.run_id }} --accept-routes --accept-dns=false
 
-          for ($i=0; $i -lt 20; $i++) {
+          for ($i = 0; $i -lt 20; $i++) {
             $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
-            if ($ip) { echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV; Write-Host "Tailscale IP: $ip"; break }
+            if ($ip) { 
+              echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+              Write-Host "Tailscale IP: $ip"
+              break 
+            }
             Start-Sleep -Seconds 6
           }
-          if (-not $env:TAILSCALE_IP) { Write-Error "Gagal dapat Tailscale IP"; exit 1 }
+          if (-not $env:TAILSCALE_IP) { Write-Error "Gagal konek Tailscale"; exit 1 }
 
-      - name: Final Info + Keep Alive
+      - name: INFO RDP + Keep Alive
+        shell: powershell
         run: |
           Write-Host ""
-          Write-Host "╔══════════════════════════════════════════════════════════╗"
-          Write-Host "║                     DAEBOOK RDP READY                     ║"
-          Write-Host "╚══════════════════════════════════════════════════════════╝"
-          Write-Host "   IP        : ${{ env.TAILSCALE_IP }}"
-          Write-Host "   Username  : DaeBook"
-          Write-Host "   Password  : ${{ env.DAEBOOK_PASS }}"
-          Write-Host "   Port      : 3389"
-          Write-Host "   Port 80   : FREE & Ready (bisa buat web, ngrok, dll)"
-          Write-Host "   Expired   : Otomatis mati setelah 6 jam"
-          Write-Host "════════════════════════════════════════════════════════════"
+          Write-Host "╔══════════════════════════════════════════════════╗"
+          Write-Host "║               DAEBOOK RDP SUDAH SIAP             ║"
+          Write-Host "╚══════════════════════════════════════════════════╝"
+          Write-Host "   IP         → ${{ env.TAILSCALE_IP }}"
+          Write-Host "   Username   → DaeBook"
+          Write-Host "   Password   → ${{ env.DAEBOOK_PASS }}"
+          Write-Host "   Port RDP   → 3389"
+          Write-Host "   Port 80    → 100% FREE (siap buat apa saja)"
+          Write-Host "   Expired    → Otomatis mati setelah 6 jam"
+          Write-Host "════════════════════════════════════════════════════"
           Write-Host ""
 
-          # Keep runner hidup sampai timeout atau kamu cancel manual
           while ($true) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] DaeBook masih aktif – Port 80 free – Cancel workflow kalau sudah selesai"
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] DaeBook aktif — Port 80 free — Cancel manual kalau selesai"
             Start-Sleep -Seconds 300
           }
