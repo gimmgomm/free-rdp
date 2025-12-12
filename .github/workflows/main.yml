@@ -1,73 +1,98 @@
-name: RDP
+# File: .github/workflows/daebook-rdp.yml
+name: DaeBook RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  rdp-daebook:
+  daebook-rdp:
     runs-on: windows-latest
-    timeout-minutes: 1440
+    timeout-minutes: 360
 
     steps:
-      - name: Enable RDP
+      - name: Cleanup & Free Port 80 + 443 (Fix Windows 11 Tabrakan)
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Restart-Service TermService -Force
-
-      - name: Buat User DaeBook + Random Password Administrator
-        run: |
-          # Password DaeBook (24 char)
-          $daePass = -join ((65..90 + 97..122 + 48..57 + 33..46 + 58..64 + 91..96 + 123..126) | Get-Random -Count 24 | % {[char]$_})
-          $daeSec  = ConvertTo-SecureString $daePass -AsPlainText -Force
-
-          # Password Administrator (28 char)
-          $adminPass = -join ((65..90 + 97..122 + 48..57 + 33..46 + 58..64 + 91..96 + 123..126) | Get-Random -Count 28 | % {[char]$_})
-          $adminSec  = ConvertTo-SecureString $adminPass -AsPlainText -Force
-
-          # Buat user DaeBook + masukin ke grup yang benar
-          New-LocalUser -Name "DaeBook" -Password $daeSec -AccountNeverExpires -PasswordNeverExpires:$true -FullName "DaeBook" -Description "GitHub Runner"
-          Add-LocalGroupMember -Group "Administrators" -Member "DaeBook" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "DaeBook" -ErrorAction SilentlyContinue
-
-          # Random ulang password built-in Administrator + aktifin
-          net user Administrator $adminPass
-          net user Administrator /active:yes
-
-          echo "DAE_PASS=$daePass" >> $env:GITHUB_ENV
-          echo "ADMIN_PASS=$adminPass" >> $env:GITHUB_ENV
-
-      - name: Install & Connect Tailscale
-        run: |
-          iwr https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile ts.msi
-          msiexec /i ts.msi /quiet /norestart
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=dae-${{ github.run_id }} --accept-risk=all
-
-          for($i=0;$i -lt 25;$i++){
-            $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
-            if($ip){ echo "TS_IP=$ip" >> $env:GITHUB_ENV; break }
-            Start-Sleep 4
+          # Kill semua proses yang pakai port 80 & 443
+          $ports = 80, 443
+          foreach ($port in $ports) {
+            $connection = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
+            if ($connection) {
+              $connection | ForEach-Object {
+                Write-Host "Killing PID $($_.OwningProcess) yang pakai port $port"
+                Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
+              }
+            }
           }
 
-      - name: Port Forwarding 80 → 3389
-        run: |
-          netsh interface portproxy delete v4tov4 listenport=80 listenaddress=0.0.0.0 | Out-Null
-          netsh interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 connectport=3389 connectaddress=127.0.0.1
-          netsh advfirewall firewall add rule name="RDP-80" dir=in action=allow protocol=TCP localport=80 profile=any
+          # Hapus semua HTTP.sys reservation (penyebab utama tabrakan di Windows 11)
+          netsh http delete urlacl url=http://+:80/  2>$null
+          netsh http delete urlacl url=https://+:443/ 2>$null
+          netsh http delete urlacl url=http://*:80/  2>$null
+          netsh http delete urlacl url=https://*:443/ 2>$null
 
-      - name: Info + Keep Alive
+          # Stop service yang suka ambil port 80/443
+          Stop-Service -Name "W3SVC" -Force -ErrorAction SilentlyContinue
+          Stop-Service -Name "HTTP" -Force -ErrorAction SilentlyContinue
+
+          Write-Host "Port 80 dan 443 sudah dibebaskan!"
+
+      - name: Configure RDP (NLA Off + Open Port 3389)
+        run: |
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="DaeBook-RDP" 2>$null
+          netsh advfirewall firewall add rule name="DaeBook-RDP" dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service TermService -Force
+
+      - name: Create User DaeBook (Admin + RDP Access)
+        run: |
+          $Password = (-join ((65..90)+(97..122)+(48..57)+(33,35,36,64,94) | Get-Random -Count 20 | % {[char]$_}))
+          $SecurePass = ConvertTo-SecureString $Password -AsPlainText -Force
+
+          New-LocalUser -Name "DaeBook" -Password $SecurePass -FullName "DaeBook" -Description "GitHub Actions RDP" -AccountNeverExpires -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "DaeBook"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "DaeBook"
+
+          echo "DAEBOOK_PASS=$Password" >> $env:GITHUB_ENV
+          echo "RDP_CREDS=Username: DaeBook | Password: $Password" >> $env:GITHUB_ENV
+
+      - name: Install Latest Tailscale (Auto Update)
+        run: |
+          powershell.exe -Command "iwr -useb https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile "$env:TEMP\tailscale.msi"
+          Start-Process msiexec.exe -Wait -ArgumentList '/i', "$env:TEMP\tailscale.msi", '/quiet', '/norestart'
+          Remove-Item "$env:TEMP\tailscale.msi" -Force
+
+      - name: Connect to Tailscale
+        run: |
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=daebook-${{ github.run_id }} --accept-routes --accept-dns=false
+
+          for ($i=0; $i -lt 20; $i++) {
+            $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
+            if ($ip) { echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV; Write-Host "Tailscale IP: $ip"; break }
+            Start-Sleep -Seconds 6
+          }
+          if (-not $env:TAILSCALE_IP) { Write-Error "Gagal dapat Tailscale IP"; exit 1 }
+
+      - name: Final Info + Keep Alive
         run: |
           Write-Host ""
-          Write-Host "════════════════════════════════════════"
-          Write-Host "           RDP SIAP – CONNECT KE PORT 80"
-          Write-Host "════════════════════════════════════════"
-          Write-Host "IP        : $($env:TS_IP):80"
-          Write-Host "User 1    : DaeBook"
-          Write-Host "Pass 1    : $($env:DAE_PASS)"
-          Write-Host "User 2    : Administrator"
-          Write-Host "Pass 2    : $($env:ADMIN_PASS)"
-          Write-Host "════════════════════════════════════════"
-          while($true){
-            Write-Host "[$(Get-Date -Format HH:mm:ss)] Aktif → $($env:TS_IP):80"
-            Start-Sleep 300
+          Write-Host "╔══════════════════════════════════════════════════════════╗"
+          Write-Host "║                     DAEBOOK RDP READY                     ║"
+          Write-Host "╚══════════════════════════════════════════════════════════╝"
+          Write-Host "   IP        : ${{ env.TAILSCALE_IP }}"
+          Write-Host "   Username  : DaeBook"
+          Write-Host "   Password  : ${{ env.DAEBOOK_PASS }}"
+          Write-Host "   Port      : 3389"
+          Write-Host "   Port 80   : FREE & Ready (bisa buat web, ngrok, dll)"
+          Write-Host "   Expired   : Otomatis mati setelah 6 jam"
+          Write-Host "════════════════════════════════════════════════════════════"
+          Write-Host ""
+
+          # Keep runner hidup sampai timeout atau kamu cancel manual
+          while ($true) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] DaeBook masih aktif – Port 80 free – Cancel workflow kalau sudah selesai"
+            Start-Sleep -Seconds 300
           }
